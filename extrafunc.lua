@@ -200,3 +200,4 @@ env.getsignalarguments     = getsignalarguments
 env.getsignalargumentsinfo = getsignalargumentsinfo
 env.getsignalwhitelist     = getsignalwhitelist
 env.cansignalreplicate     = cansignalreplicate
+print("[CattStar] Extra func Library loaded successfully.")
