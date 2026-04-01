@@ -1,4 +1,4 @@
-local _sv = Instance.new("StringValue")
+local _sv = Instance.new("BoolValue")
 local commCache = {}
 
 local function getCommFolder()
@@ -27,67 +27,74 @@ local function deepCopy(orig)
     end
     return setmetatable(copy, getmetatable(orig))
 end
+local function makeSignal()
+    local connections = {}
+    local onceList    = {}
+    local waitList    = {}
+    local connId      = 0
 
-local function makeEventObject(bindable)
-    local pendingArgs = {}
-    local argCounter  = 0
+    local function fireAll(...)
+        local args = table.pack(...)
+
+    
+        local onceCopy = onceList
+        onceList = {}
+        for _, fn in pairs(onceCopy) do
+            task.spawn(fn, table.unpack(args, 1, args.n))
+        end
+
+        
+        for _, fn in pairs(connections) do
+            task.spawn(fn, table.unpack(args, 1, args.n))
+        end
+
+ 
+        local waitCopy = waitList
+        waitList = {}
+        for _, thread in ipairs(waitCopy) do
+            task.spawn(thread, table.unpack(args, 1, args.n))
+        end
+    end
 
     local signal = {}
 
     signal.Connect = function(self, fn)
-        return bindable.Event:Connect(function(id)
-            local args = pendingArgs[id]
-            if args then
-                task.defer(function()
-                    pendingArgs[id] = nil
-                end)
-                fn(table.unpack(args, 1, args.n))
-            end
-        end)
+        connId += 1
+        local id = connId
+        connections[id] = fn
+        return {
+            Disconnect = function(self) connections[id] = nil end,
+        }
     end
 
     signal.Once = function(self, fn)
-        local conn
-        conn = bindable.Event:Connect(function(id)
-            conn:Disconnect()
-            local args = pendingArgs[id]
-            if args then
-                task.defer(function()
-                    pendingArgs[id] = nil
-                end)
-                fn(table.unpack(args, 1, args.n))
-            end
-        end)
-        return conn
+        connId += 1
+        local id = connId
+        onceList[id] = fn
+        return {
+            Disconnect = function(self) onceList[id] = nil end,
+        }
     end
 
     signal.Wait = function(self)
         local thread = coroutine.running()
-        local conn
-        conn = bindable.Event:Connect(function(id)
-            conn:Disconnect()
-            local args = pendingArgs[id]
-            if args then
-                task.defer(function()
-                    pendingArgs[id] = nil
-                end)
-                task.spawn(thread, table.unpack(args, 1, args.n))
-            else
-                task.spawn(thread)
-            end
-        end)
+        table.insert(waitList, thread)
         return coroutine.yield()
     end
 
+    return signal, fireAll
+end
+
+local function makeEventObject(bindable)
+    local signal, fireAll = makeSignal()
+    bindable.Event:Connect(function(...)
+        fireAll(...)
+    end)
+
     local obj = {}
-
     obj.Event = signal
-
     obj.Fire = function(self, ...)
-        argCounter += 1
-        local id = argCounter
-        pendingArgs[id] = table.pack(...)
-        bindable:Fire(id)
+        fireAll(...)
     end
 
     obj.Connect = function(self, fn) return signal:Connect(fn) end
@@ -109,69 +116,9 @@ end
 
 local function isparallel()
     local ok = pcall(function()
-        local v = _sv.Value
-        _sv.Value = v
+        _sv.Value = _sv.Value
     end)
     return not ok
-end
-
-local RUNNER_NAME = "__ee_actor_runner__"
-local EXEC_MSG    = "__ee_exec__"
-local runnerReady = {}
-
-local function ensureRunner(actor)
-    if runnerReady[actor] then return end
-
-    if actor:FindFirstChild(RUNNER_NAME) then
-        runnerReady[actor] = true
-        return
-    end
-
-    local debugId   = tostring(actor:GetDebugId())
-    local readyName = "__ee_ready_" .. debugId .. "__"
-    local readyBE   = Instance.new("BindableEvent")
-    readyBE.Name    = readyName
-    readyBE.Parent  = game:GetService("CoreGui")
-
-    readyBE.Event:Once(function()
-        runnerReady[actor] = true
-        readyBE:Destroy()
-    end)
-
-    local s        = Instance.new("Script")
-    s.Name         = RUNNER_NAME
-    s.Enabled      = false
-    s.Source       = string.format([[
-        local hs    = game:GetService("HttpService")
-        local actor = script.Parent
-
-        local readyBE = game:GetService("CoreGui"):FindFirstChild(%q)
-        if readyBE then readyBE:Fire() end
-
-        actor:BindToMessage(%q, function(code, argsJson)
-            local fn, err = loadstring(code)
-            if not fn then
-                warn("run_on_actor compile error: " .. tostring(err))
-                return
-            end
-            local callArgs = {}
-            if argsJson and argsJson ~= "" then
-                local ok, decoded = pcall(function()
-                    return hs:JSONDecode(argsJson)
-                end)
-                if ok and type(decoded) == "table" then
-                    callArgs = decoded
-                end
-            end
-            local ok2, e = pcall(fn, table.unpack(callArgs))
-            if not ok2 then
-                warn("run_on_actor runtime error: " .. tostring(e))
-            end
-        end)
-    ]], readyName, EXEC_MSG)
-
-    s.Parent  = actor
-    s.Enabled = true
 end
 
 local function run_on_actor(actor, code, ...)
@@ -188,33 +135,21 @@ local function run_on_actor(actor, code, ...)
         "bad argument #1 to 'run_on_actor' (Actor expected)"
     )
 
-    local hs       = game:GetService("HttpService")
-    local safeArgs = {}
-    for i = 1, select("#", ...) do
-        local v = select(i, ...)
-        local t = type(v)
-        if t == "string" or t == "number" or t == "boolean" then
-            safeArgs[i] = v
-        end
+    local fn, compileErr = loadstring(code)
+    if not fn then
+        error("run_on_actor compile error: " .. tostring(compileErr), 2)
     end
 
-    local argsJson = ""
-    local ok, encoded = pcall(hs.JSONEncode, hs, safeArgs)
-    if ok then argsJson = encoded end
+    local safeArgs = {}
+    for i = 1, select("#", ...) do
+        safeArgs[i] = deepCopy(select(i, ...))
+    end
 
-    ensureRunner(actor)
-
-    task.spawn(function()
-        local elapsed = 0
-        while not runnerReady[actor] and elapsed < 2 do
-            task.wait(0.01)
-            elapsed += 0.01
+    task.defer(function()
+        local ok, err = pcall(fn, table.unpack(safeArgs))
+        if not ok then
+            warn("run_on_actor runtime error: " .. tostring(err))
         end
-        if not runnerReady[actor] then
-            warn("run_on_actor: runner not ready for Actor: " .. actor.Name)
-            return
-        end
-        actor:SendMessage(EXEC_MSG, code, argsJson)
     end)
 end
 
@@ -253,14 +188,13 @@ local function get_comm_channel(id)
     return eventObj
 end
 
-
 local env = getgenv()
 
 env.getactors           = getactors
 env.run_on_actor        = run_on_actor
-env.runonactor          = run_on_actor      -- alias
+env.runonactor          = run_on_actor
 env.isparallel          = isparallel
-env.checkparallel       = isparallel        -- alias
-env.inparallel          = isparallel        -- alias
+env.checkparallel       = isparallel
+env.inparallel          = isparallel
 env.create_comm_channel = create_comm_channel
 env.get_comm_channel    = get_comm_channel
