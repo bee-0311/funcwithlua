@@ -124,4 +124,4 @@ env.getsignalarguments     = getsignalarguments
 env.getsignalargumentsinfo = getsignalargumentsinfo
 env.getsignalwhitelist     = getsignalwhitelist
 env.cansignalreplicate     = cansignalreplicate
-print("[CattStar] Signals Library loaded successfully.")
+
